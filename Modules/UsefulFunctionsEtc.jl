@@ -12,7 +12,7 @@ module UsefulFunctionsEtc
 	export iConc, excitedState, groundState, calcMeanKet, calcMeanAndVarKet
 	export calcMeanForOneSysKet, calcMeanAndVarForOneSysKet, cvrv, rvcv, sse_f, sse_g
 	export ParametersSSE, ParametersSSEDisorder, sseS_f, sseS_g, boseHubbardDisorder
-	export Operators, ithMeanOneSysKet
+	export Operators, ithMeanOneSysKet, make1010State, setNewBH_prob_func
 
     const 𝑖 = 1.0im
     const ᶜ = Complex{Float64}
@@ -78,7 +78,9 @@ module UsefulFunctionsEtc
 		U::Float64
 		J::Float64
 		meas::Array{Tuple{Array{Complex{Float64},2},Array{Complex{Float64},2}},1}
+		target::Int64
 		op::Operators
+		t::TimeData
 		sumccad::Array{Complex{Float64},2}
 		dim::Int64
 		numOfSys::Int64
@@ -86,12 +88,28 @@ module UsefulFunctionsEtc
 		traj::Int64
 		vPA::Array{Array{Complex{Float64},1},1}
 		function ParametersSSEDisorder(;
-				Γ::Float64,W::Float64,U::Float64,J::Float64,
-				meas::Array{Tuple{Array{Complex{Float64},2},Array{Complex{Float64},2}},1},
-			    op::Operators, numOfSys::Int64, s::Int64, traj::Int64)
+				Γ::Float64,W::Float64,U::Float64,J::Float64, target::Int64,
+				t::TimeData, numOfSys::Int64, s::Int64, traj::Int64)
 
-			new(Γ,boseHubbardDisorder(Wj=W/J, Uj=U/J, n=op.n, a=op.a, 𝐼=op.𝐼, numOfSys=numOfSys),
-			W, U, J, meas, op, (meas[1][1] + meas[1][1]'), s^numOfSys, numOfSys, s, traj,
+			op = Operators(s, numOfSys)
+			egOp = copy(op.𝐼)
+		    egOp[1] = -1
+		    meas = [(kronForMany(sqrt(Γ)*egOp, op.𝐼, target, numOfSys), kronForMany(sqrt(Γ)*1im*egOp, op.𝐼, target, numOfSys))]
+
+			new(Γ,
+			boseHubbardDisorder(Wj=W/J, Uj=U/J, n=op.n, a=op.a, 𝐼=op.𝐼, numOfSys=numOfSys),
+			W,
+			U,
+			J,
+			meas,
+			target,
+			op,
+			t,
+			(meas[1][1] + meas[1][1]'),
+			s^numOfSys,
+			numOfSys,
+			s,
+			traj,
 			[complex(zeros(s^numOfSys)) for _ in 1:4])
 		end
 	end
@@ -380,27 +398,18 @@ module UsefulFunctionsEtc
         end
         mean, var
     end
-	function calcMeanForOneSysKet(ensSol, f::Function, t, dim::Int64, traj::Int64, f_args...;i::Int64, numOfSys::Int64, s::Int64)
+	function calcMeanForOneSysKet(ensSol, p, i, f::Function, f_args...)
         mean = []
-        for tᵢ in t
+        for tᵢ in 1:length(p.t.times)
             sols = get_timestep(ensSol, tᵢ)
             sumₘ = 0.0
             for sol in sols
 				sol = rvcv(sol)
-                sumₘ += f(solveOneDensity(sol*sol', i, numOfSys, s), f_args...)
+                sumₘ += f(solveOneDensity(sol*sol', i, p.numOfSys, p.s), f_args...)
             end
-            push!(mean, sumₘ/traj)
+            push!(mean, sumₘ/p.traj)
         end
         mean
-    end
-	function ithMeanOneSysKet(ensSol, p, f, f_args...; i, sysᵢ)
-        mean = 0.0
-        sols = get_timestep(ensSol, i)
-        for sol in sols
-			sol = rvcv(sol)
-			mean += f(solveOneDensity(sol*sol', sysᵢ, p.numOfSys, p.s), f_args...)
-        end
-        mean /= p.traj
     end
     function calcMeanAndVarForOneSysKet(ensSol, f::Function, t, dim::Int64, traj::Int64, f_args...;i::Int64, numOfSys::Int64, s::Int64)
         mean = []
@@ -419,6 +428,15 @@ module UsefulFunctionsEtc
             push!(var, sumᵥ/traj - (sumₘ/traj).^2)
         end
         mean, var
+    end
+	function ithMeanOneSysKet(ensSol, p, f, f_args...; i, sysᵢ)
+        mean = 0.0
+        sols = get_timestep(ensSol, i)
+        for sol in sols
+			sol = rvcv(sol)
+			mean += f(solveOneDensity(sol*sol', sysᵢ, p.numOfSys, p.s), f_args...)
+        end
+        mean /= p.traj
     end
 	function smeForHD_f(dρ::Array{Float64,1},ρ::Array{Float64,1},p,t::Float64)
         p.mPA[4] .= rvcm(ρ, p.dim)
@@ -540,6 +558,28 @@ module UsefulFunctionsEtc
 	    m[1] = 1
 	    m
 	end
+	function make1010State(s, numOfSys)
+        e = complex(zeros(s))
+        e[2] = 1.0
+        g = complex(zeros(s))
+        g[1] = 1.0
+        states = [e]
+        for i in 2:numOfSys
+            if i % 2 == 0
+                push!(states, g)
+            else
+                push!(states, e)
+            end
+        end
+        cvrv(kronForMany(states))
+    end
+	function setNewBH_prob_func(prob, i, repeat)
+        𝐻 = boseHubbardDisorder(Uj=prob.p.U/prob.p.J, Wj=prob.p.W/prob.p.J; n=prob.p.op.n,
+                            a=prob.p.op.a, 𝐼=prob.p.op.𝐼, numOfSys=prob.p.numOfSys)
+        newP = deepcopy(prob.p)
+        newP.𝐻 = 𝐻
+        remake(prob, p=newP)
+    end
 
 	#=function make_𝐼_a_ad_n_nAll(s::Int64, numOfSys::Int64)
 		𝐼 = makeI(s)
