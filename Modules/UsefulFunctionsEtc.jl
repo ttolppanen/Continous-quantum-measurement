@@ -1,15 +1,18 @@
 module UsefulFunctionsEtc
-    using LinearAlgebra: tr
+    using LinearAlgebra: tr, norm
     using Statistics: mean
-    using DifferentialEquations, IterTools, LinearAlgebra
+    using DifferentialEquations, IterTools, LinearAlgebra, Random, Distributed
     using DifferentialEquations.EnsembleAnalysis
 	export 𝑖, ᶜ
     export com, antiCom, expVal, ensMean, matToComp, 𝒟, partialTrace, photonNumber
     export ℋ, kronForMany, makeI, solveOneDensity, lowOp
     export listOfOperators, smeForHD_f, smeForHD_g, calcMean, calcMeanAndVar
-    export TimeData, Parameters, cmrv, make_𝐼_a_ad_n_nAll, calcMeanForOneSys
+    export TimeData, Parameters, cmrv, rvcm, make_𝐼_a_ad_n_nAll, calcMeanForOneSys
 	export calcMeanAndVarForOneSys, boseHubbard, singleDetection_f, singleDetection_g
-	export iConc, excitedState, groundState
+	export iConc, excitedState, groundState, calcMeanKet, calcMeanAndVarKet
+	export calcMeanForOneSysKet, calcMeanAndVarForOneSysKet, cvrv, rvcv, sse_f, sse_g
+	export ParametersSSE, ParametersSSEDisorder, sseS_f, sseS_g, boseHubbardDisorder
+	export Operators, ithMeanOneSysKet
 
     const 𝑖 = 1.0im
     const ᶜ = Complex{Float64}
@@ -26,6 +29,21 @@ module UsefulFunctionsEtc
     		new(dt, (startTime, endTime), startTime:dt:endTime)
     	end
     end
+	struct Operators
+		n::Array{Complex{Float64},2}
+		nAll::Array{Complex{Float64},2}
+		a::Array{Complex{Float64},2}
+		ad::Array{Complex{Float64},2}
+		𝐼::Array{Complex{Float64},2}
+		function Operators(s::Int64, numOfSys::Int64)
+			𝐼 = makeI(s)
+		    a = lowOp(s)
+		    ad = copy(a')
+		    n = ad*a
+		    nAll =  sum(listOfOperators(n, numOfSys, 𝐼))
+			new(n, nAll, a, ad, 𝐼)
+		end
+	end
 	mutable struct Parameters
 		Γ::Float64
 		ϕ::Float64
@@ -37,6 +55,44 @@ module UsefulFunctionsEtc
 		function Parameters(;Γ::Float64,ϕ::Float64,𝐻::Array{Complex{Float64},2},
 							op::Array{Array{Complex{Float64},2},1},dim::Int64)
 			new(Γ,ϕ,𝐻,op,dim,[complex(zeros(dim,dim)) for _ in 1:5],zeros((dim)^2*2))
+		end
+	end
+	mutable struct ParametersSSE
+		Γ::Float64
+		ϕ::Float64
+		𝐻::Array{Complex{Float64},2}
+		op::Array{Tuple{Array{Complex{Float64},2},Array{Complex{Float64},2}},1}
+		sumccad::Array{Complex{Float64},2}
+		dim::Int64
+		vPA::Array{Array{Complex{Float64},1},1}
+		function ParametersSSE(;Γ::Float64,ϕ::Float64,𝐻::Array{Complex{Float64},2},
+				op::Array{Tuple{Array{Complex{Float64},2},Array{Complex{Float64},2}},1},
+				dim::Int64)
+			new(Γ,ϕ,𝐻,op,(op[1][1] + op[1][1]'),dim,[complex(zeros(dim)) for _ in 1:4])
+		end
+	end
+	mutable struct ParametersSSEDisorder
+		Γ::Float64
+		𝐻::Array{Complex{Float64},2}
+		W::Float64
+		U::Float64
+		J::Float64
+		meas::Array{Tuple{Array{Complex{Float64},2},Array{Complex{Float64},2}},1}
+		op::Operators
+		sumccad::Array{Complex{Float64},2}
+		dim::Int64
+		numOfSys::Int64
+		s::Int64
+		traj::Int64
+		vPA::Array{Array{Complex{Float64},1},1}
+		function ParametersSSEDisorder(;
+				Γ::Float64,W::Float64,U::Float64,J::Float64,
+				meas::Array{Tuple{Array{Complex{Float64},2},Array{Complex{Float64},2}},1},
+			    op::Operators, numOfSys::Int64, s::Int64, traj::Int64)
+
+			new(Γ,boseHubbardDisorder(Wj=W/J, Uj=U/J, n=op.n, a=op.a, 𝐼=op.𝐼, numOfSys=numOfSys),
+			W, U, J, meas, op, (meas[1][1] + meas[1][1]'), s^numOfSys, numOfSys, s, traj,
+			[complex(zeros(s^numOfSys)) for _ in 1:4])
 		end
 	end
     function com(A::Array{Complex{Float64},2}, B::Array{Complex{Float64},2})
@@ -137,6 +193,18 @@ module UsefulFunctionsEtc
 		end
 		H
 	end
+	function boseHubbardDisorder(;Wj::Float64, Uj::Float64, n::Array{Complex{Float64},2}, a::Array{Complex{Float64},2}, 𝐼::Array{Complex{Float64},2}, numOfSys::Int64)
+		nᵢ = kronForMany(n, 𝐼, 1, numOfSys)
+		𝐼All = kronForMany(𝐼, 𝐼, 1, numOfSys)
+		H = rand(-Wj:0.001:Wj)*nᵢ - Uj*0.5*nᵢ*(nᵢ-𝐼All)
+		for i in 2:numOfSys
+			nᵢ = kronForMany(n, 𝐼, i, numOfSys)
+			aᵢ₋₁ = kronForMany(a, 𝐼, i - 1, numOfSys)
+			aᵢ = kronForMany(a, 𝐼, i, numOfSys)
+			H .+= rand(-Wj:0.001:Wj)*nᵢ - Uj*0.5*nᵢ*(nᵢ-𝐼All) + (aᵢ₋₁*aᵢ' + aᵢ₋₁'*aᵢ)
+		end
+		H
+	end
 	function lowOp(s::Int64) #â
         a = zeros(s, s)
         for i in 1:s-1
@@ -176,7 +244,7 @@ module UsefulFunctionsEtc
         end
         res
     end
-    function kronForMany(m::Array{Complex{Float64},2}, 𝐼, index, numOfSys)
+    function kronForMany(m::Union{Array{Complex{Float64},2}, Array{Complex{Float64},1}}, 𝐼, index, numOfSys)
         if index == numOfSys
             s = m
         else
@@ -191,7 +259,7 @@ module UsefulFunctionsEtc
         end
         s
     end
-    function kronForMany(m::Array{Array{Complex{Float64},2},1})
+    function kronForMany(m::Union{Array{Array{Complex{Float64},2},1}, Array{Array{Complex{Float64},1},1}})
         s = m[end]
         for (isFirst, mᵢ) in flagfirst(reverse(m))
             if isFirst
@@ -281,6 +349,77 @@ module UsefulFunctionsEtc
         end
         mean, var
     end
+	function calcMeanKet(ensSol, f::Function, t, dim::Int64, traj::Int64, f_args...)
+        mean = []
+        for tᵢ in t
+            sols = get_timestep(ensSol, tᵢ)
+            sumₘ = 0.0
+            for sol in sols
+				sol = rvcv(sol)
+                sumₘ += f(sol*sol', f_args...)
+            end
+            push!(mean, sumₘ/traj)
+        end
+        mean
+    end
+    function calcMeanAndVarKet(ensSol, f::Function, t, dim::Int64, traj::Int64, f_args...)
+        mean = []
+        var = []
+        for tᵢ in t
+            sols = get_timestep(ensSol, tᵢ)
+            sumₘ = 0.0
+            sumᵥ = 0.0
+            for sol in sols
+				sol = rvcv(sol)
+                fVal = f(sol*sol', f_args...)
+                sumₘ += fVal
+                sumᵥ += fVal.^2
+            end
+            push!(mean, sumₘ/traj)
+            push!(var, sumᵥ/traj - (sumₘ/traj).^2)
+        end
+        mean, var
+    end
+	function calcMeanForOneSysKet(ensSol, f::Function, t, dim::Int64, traj::Int64, f_args...;i::Int64, numOfSys::Int64, s::Int64)
+        mean = []
+        for tᵢ in t
+            sols = get_timestep(ensSol, tᵢ)
+            sumₘ = 0.0
+            for sol in sols
+				sol = rvcv(sol)
+                sumₘ += f(solveOneDensity(sol*sol', i, numOfSys, s), f_args...)
+            end
+            push!(mean, sumₘ/traj)
+        end
+        mean
+    end
+	function ithMeanOneSysKet(ensSol, p, f, f_args...; i, sysᵢ)
+        mean = 0.0
+        sols = get_timestep(ensSol, i)
+        for sol in sols
+			sol = rvcv(sol)
+			mean += f(solveOneDensity(sol*sol', sysᵢ, p.numOfSys, p.s), f_args...)
+        end
+        mean /= p.traj
+    end
+    function calcMeanAndVarForOneSysKet(ensSol, f::Function, t, dim::Int64, traj::Int64, f_args...;i::Int64, numOfSys::Int64, s::Int64)
+        mean = []
+        var = []
+        for tᵢ in t
+            sols = get_timestep(ensSol, tᵢ)
+            sumₘ = 0.0
+            sumᵥ = 0.0
+            for sol in sols
+				sol = rvcv(sol)
+                fVal = f(solveOneDensity(sol*sol', i, numOfSys, s), f_args...)
+                sumₘ += fVal
+                sumᵥ += fVal.^2
+            end
+            push!(mean, sumₘ/traj)
+            push!(var, sumᵥ/traj - (sumₘ/traj).^2)
+        end
+        mean, var
+    end
 	function smeForHD_f(dρ::Array{Float64,1},ρ::Array{Float64,1},p,t::Float64)
         p.mPA[4] .= rvcm(ρ, p.dim)
         p.mPA[5] .= -𝑖*com(p.𝐻, p.mPA[4], p.mPA[1], p.mPA[2])
@@ -322,33 +461,71 @@ module UsefulFunctionsEtc
             end
         end
 	end
-	function sse_g(dρ::Array{Float64,1},ρ::Array{Float64,1},p,t::Float64)
+	function sse_f(dψ::Array{Float64,1},ψ::Array{Float64,1},p,t::Float64)
+		ψ .*= 1/norm(rvcv(ψ))
+		p.vPA[1] .= rvcv(ψ) #p.vPA[1] = ψ
+		mul!(p.vPA[2], -𝑖*p.𝐻, p.vPA[1]) #p.vPA[2] = f
+		for c in p.op
+			eVal = expVal(p.vPA[1], c + c')
+			mul!(p.vPA[3], c, p.vPA[1]) #c*ψ
+			mul!(p.vPA[4], c', p.vPA[3]) #c'*c*ψ
+			p.vPA[2] .+= -1/4*p.vPA[4] + 1/8*eVal*p.vPA[3] - 1/32*eVal^2*p.vPA[1]
+		end
+		dψ .= cvrv(p.vPA[2])
 	end
-	function sse_f(dρ::Array{Float64,2},ρ::Array{Float64,1},p,t::Float64)
+	function sse_g(dψ::Array{Float64,2},ψ::Array{Float64,1},p,t::Float64)
+		p.vPA[1] .= rvcv(ψ)
+		for (i,c) in enumerate(p.op)
+			eVal = expVal(p.vPA[1], c + c')
+			mul!(p.vPA[3], c, p.vPA[1])
+			p.vPA[2] .= 1/2*p.vPA[3] - 1/4*eVal*p.vPA[1]
+			g = cvrv(p.vPA[2])
+			for j in 1:2*p.dim
+				dψ[j,i] = g[j]
+			end
+		end
+	end
+	function sseS_f(dψ::Array{Float64,1},ψ::Array{Float64,1},p,t::Float64)
+		ψ .*= 1/norm(rvcv(ψ))
+		p.vPA[1] .= rvcv(ψ) #p.vPA[1] = ψ
+		mul!(p.vPA[2], -𝑖*p.𝐻, p.vPA[1]) #p.vPA[2] = f
+		c = p.meas[1][1]
+		eVal = expVal(p.vPA[1], p.sumccad)
+		mul!(p.vPA[3], c, p.vPA[1]) #c*ψ
+		mul!(p.vPA[4], c', p.vPA[3]) #c'*c*ψ
+		p.vPA[2] .+= -1/4*p.vPA[4] .+ 1/8*eVal*p.vPA[3] .- 1/32*eVal^2*p.vPA[1]
+		dψ .= cvrv(p.vPA[2])
+	end
+	function sseS_g(dψ::Array{Float64,2},ψ::Array{Float64,1},p,t::Float64)
+		p.vPA[1] .= rvcv(ψ)
+		for (i,op) in enumerate(p.meas)
+			eVal = expVal(p.vPA[1], p.sumccad)#Ei toimi monelle mittaukselle, korjaa
+			mul!(p.vPA[3], op[1], p.vPA[1])
+			p.vPA[2] .= 1/2*p.vPA[3] .- 1/4*eVal*p.vPA[1]
+			g1 = cvrv(p.vPA[2])
+			mul!(p.vPA[3], op[2], p.vPA[1])
+			p.vPA[2] .= 1/2*p.vPA[3]
+			g2 = cvrv(p.vPA[2])
+			for j in 1:2*p.dim
+				dψ[j,i*2 - 1] = g1[j]
+				dψ[j,i*2] = g2[j]
+			end
+		end
 	end
 	function cmrv(m::Array{Complex{Float64},2})
         cvrv(vec(m))
     end
     function rvcm(v::Array{Float64,1}, dim::Int64)
-        reshape(rvcv(v, dim), dim, dim)
+        reshape(rvcv(v), dim, dim)
     end
     function cvrv(v::Array{Complex{Float64},1})
         vcat(real(v),imag(v))
     end
-    function rvcv(v::Array{Float64,1}, dim::Int64)
-        d² = dim^2
-        a = @view v[1:d²]
-        b = @view v[(d²+1):end]
+    function rvcv(v::Array{Float64,1})
+        a = @view v[1:end÷2]
+        b = @view v[(end÷2+1):end]
         a + 1im*b
     end
-	function make_𝐼_a_ad_n_nAll(s::Int64, numOfSys::Int64)
-		𝐼 = makeI(s)
-	    a = lowOp(s)
-	    ad = copy(a')
-	    n = ad*a
-	    nAll =  sum(listOfOperators(n, numOfSys, 𝐼))
-		𝐼, a, ad, n, nAll
-	end
 	function iConc(ρ::Array{Complex{Float64},2}, s::Int64, numOfSys::Int64)
 		ρₐ = solveOneDensity(ρ, 1, numOfSys, s)
 		sqrt(2*max(1-real(tr(ρₐ*ρₐ)), 0))
@@ -363,4 +540,14 @@ module UsefulFunctionsEtc
 	    m[1] = 1
 	    m
 	end
+
+	#=function make_𝐼_a_ad_n_nAll(s::Int64, numOfSys::Int64)
+		𝐼 = makeI(s)
+	    a = lowOp(s)
+	    ad = copy(a')
+	    n = ad*a
+	    nAll =  sum(listOfOperators(n, numOfSys, 𝐼))
+		𝐼, a, ad, n, nAll
+	end
+	=#
 end
