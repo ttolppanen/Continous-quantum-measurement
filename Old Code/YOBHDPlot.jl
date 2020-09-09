@@ -59,14 +59,17 @@ function main()
         end
         pl
     end
-    data = [(0.0, "CalcData/BHD200.jld2"),
-    (1.0, "CalcData/BHD200_G1.jld2"),
-    (5.0, "CalcData/BHD200_G5.jld2"),
-    (15.0, "CalcData/BHD200_G15.jld2")]
-    plotS(12, data)
-    #=
-    plotS(6, data)
-    =#
-
+    t = 0.0:0.01:5.0
+    @load "s4r10traj10.jld2" finalRes
+    isFirst = true
+    (res, v) = finalRes[1]
+    asd = plot(t, res, ribbon=v)
+    for (res, v) in finalRes
+        if !isFirst
+            plot!(t, res, ribbon=v)
+        end
+        isFirst = false
+    end
+    asd
 end
 @time main()
